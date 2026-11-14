@@ -3,8 +3,5 @@
 
 -r requirements.txt
 
-# Model specific architecture libraries (all open-source)
-# Real-ESRGAN / BasicSR (BSD-3-Clause / Apache-2.0)
-basicsr>=1.4.2
-facexlib>=0.3.0
-gfpgan>=1.3.8
+# Real-ESRGAN inference is implemented in visionscale.models.realesrgan.
+# PyTorch from requirements.txt is the only additional runtime requirement.

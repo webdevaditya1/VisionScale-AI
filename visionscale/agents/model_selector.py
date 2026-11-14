@@ -32,10 +32,7 @@ class ModelSelectorAgent(BaseAgent):
 
         # 1. Primary Upscaler Selection
         if category == ContentCategory.ANIME:
-            if scale_factor <= 2.2 and "real-cugan-2x" in MODEL_REGISTRY:
-                chosen_upscaler_id = "real-cugan-2x"
-            else:
-                chosen_upscaler_id = "realesrgan-x4plus-anime"
+            chosen_upscaler_id = "realesrgan-x4plus-anime"
         else:
             chosen_upscaler_id = "realesrgan-x4plus"
 

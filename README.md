@@ -42,7 +42,7 @@
 2. **Audio & FPS Preservation**:
    Source video frame rate (including fractional rates like `23.976` or `29.970`), original duration, aspect ratio, and multi-channel audio tracks (AAC, AC3, Opus) are copied lossless-by-default (`-c:a copy`) without audio-video desync.
 3. **No Paid APIs or Commercial Services**:
-   100% powered by verified open-source models (Real-ESRGAN, Real-CUGAN, GFPGAN, BasicVSR++, RIFE) with zero paid subscription dependencies.
+   The executable video pipeline uses open-source Real-ESRGAN models. Other open-source models are catalogued but are not yet integrated into inference.
 4. **Colab & Kaggle Hardware Awareness**:
    Automatically detects container paths (`/content` on Colab, `/kaggle/working` on Kaggle, `./visionscale_workspace` on Local) and configures temp scratch directories on fast cloud ephemeral disks (`/tmp`).
 5. **Intelligent Dynamic Tiling**:
@@ -58,7 +58,7 @@ VisionScale AI coordinates tasks through a chain of deterministic Python agents 
 flowchart TD
     A["Input Source (YouTube URL or Local Upload)"] --> B["Video Analyzer Agent"]
     B --> C{"Content Classification"}
-    C -->|"Anime / Flat 2D"| D["Model Selector: Real-CUGAN / Real-ESRGAN Anime"]
+    C -->|"Anime / Flat 2D"| D["Model Selector: Real-ESRGAN Anime"]
     C -->|"Live Action / Film"| E["Model Selector: Real-ESRGAN x4+"]
     D --> F["Memory Manager (Compute Tiles & FP16 Profile)"]
     E --> F
@@ -83,6 +83,7 @@ VisionScale AI
 ├── visionscale/                         # Core Python package root
 │   ├── __init__.py                      # Package initialization and version metadata
 │   ├── config.py                        # Master configuration (1080p, 4K, CRF, presets, aspect ratio math)
+│   ├── pipeline.py                      # Frame-streamed inference and video export orchestration
 │   │
 │   ├── core/                            # System diagnostics and resource managers
 │   │   ├── __init__.py                  # Core module exports
@@ -100,6 +101,7 @@ VisionScale AI
 │   ├── models/                          # Neural network architectures and weight registries
 │   │   ├── __init__.py                  # Model module exports
 │   │   ├── base.py                      # Abstract base model contract & weights download cache
+│   │   ├── realesrgan.py                # RRDBNet inference with tiled Real-ESRGAN processing
 │   │   └── registry.py                  # Registry of Real-ESRGAN, Real-CUGAN, GFPGAN, BasicVSR++, RIFE
 │   │
 │   ├── agents/                          # Deterministic pipeline agents
@@ -119,10 +121,11 @@ VisionScale AI
 │   ├── test_downloader.py               # Tests YouTube URL recognition & file upload validation
 │   ├── test_hardware.py                 # Tests GPU/CPU detection & VRAM profile calculation
 │   ├── test_platform.py                 # Tests Colab/Kaggle/Local platform path resolution
-│   └── test_video_io.py                 # Tests synthetic video creation, FFmpeg pipe, streaming, agents
+│   ├── test_video_io.py                 # Tests synthetic video creation, FFmpeg pipe, streaming, agents
+│   └── test_realesrgan_pipeline.py      # Tests tiled inference and end-to-end video export
 │
 ├── requirements.txt                     # Free, permissive open-source base dependencies
-├── requirements-gpu.txt                 # GPU-accelerated neural enhancement libraries
+├── requirements-gpu.txt                 # GPU runtime requirements
 ├── LICENSE                              # Official Apache-2.0 open-source license
 └── README.md                            # Comprehensive project manual & documentation
 ```
@@ -160,6 +163,8 @@ All models used in VisionScale AI are free and open-source:
 
 > [!NOTE]
 > Weights are kept strictly separate from the source code repository. They are downloaded directly into the designated `weights/` cache on first use.
+>
+> The current executable video pipeline supports the two Real-ESRGAN x4+ entries above. Other catalog entries are metadata only and are not yet wired to inference.
 
 ---
 
@@ -236,29 +241,10 @@ Run the automated test suite to verify your environment, FFmpeg integration, mem
 python -m pytest tests/ -v
 ```
 
-Expected output:
-```
-tests/test_config.py::test_config_defaults PASSED                        [  5%]
-tests/test_config.py::test_compute_target_dimensions_1080p PASSED        [ 10%]
-tests/test_config.py::test_compute_target_dimensions_4k PASSED           [ 15%]
-tests/test_config.py::test_config_from_dict PASSED                       [ 21%]
-tests/test_downloader.py::test_youtube_url_detection PASSED              [ 26%]
-tests/test_downloader.py::test_validate_local_upload PASSED              [ 31%]
-tests/test_hardware.py::test_detect_hardware PASSED                      [ 36%]
-tests/test_hardware.py::test_memory_manager_cpu_profile PASSED           [ 42%]
-tests/test_hardware.py::test_memory_manager_t4_vram_profile PASSED       [ 47%]
-tests/test_hardware.py::test_memory_manager_low_vram_profile PASSED      [ 52%]
-tests/test_platform.py::test_detect_platform_local PASSED                [ 57%]
-tests/test_platform.py::test_workspace_paths_creation PASSED             [ 63%]
-tests/test_platform.py::test_platform_environment_init PASSED            [ 68%]
-tests/test_video_io.py::test_probe_video PASSED                          [ 73%]
-tests/test_video_io.py::test_frame_stream_and_batches PASSED             [ 78%]
-tests/test_video_io.py::test_frame_extractor_to_disk PASSED              [ 84%]
-tests/test_video_io.py::test_ffmpeg_video_writer PASSED                  [ 89%]
-tests/test_video_io.py::test_quality_checker_agent PASSED                [ 94%]
-tests/test_video_io.py::test_agent_pipeline_orchestration PASSED         [100%]
+Expected output ends with a summary similar to:
 
-============================= 19 passed in 1.39s ==============================
+```
+============================= 24 passed in 6.12s ==============================
 ```
 
 ---
@@ -288,70 +274,27 @@ Use FP16 Precision  : True
 
 ---
 
-### Step 6: Process Video Files via Python API
+### Step 6: Enhance a Video via Python API
 
-Here is an end-to-end example analyzing a video, determining models, and reconstructing the output:
+The pipeline analyzes the input, downloads the selected Real-ESRGAN weights on first use, streams frames through tiled inference, and exports an MP4 with the source FPS and audio when supported:
 
 ```python
-from pathlib import Path
-from visionscale.config import VisionScaleConfig, ResolutionTarget, ContentCategory
-from visionscale.core.hardware import detect_hardware
-from visionscale.core.platform import initialize_platform
-from visionscale.agents.base_agent import AgentContext
-from visionscale.agents.video_analyzer import VideoAnalyzerAgent
-from visionscale.agents.model_selector import ModelSelectorAgent
-from visionscale.agents.video_exporter import VideoExporterAgent
-from visionscale.io.frame_extractor import FrameStream
-from visionscale.io.video_writer import FFmpegVideoWriter
+from visionscale.config import ContentCategory, ResolutionTarget, VisionScaleConfig
+from visionscale.pipeline import enhance_video
 
-# 1. Initialize environment & hardware
-platform = initialize_platform()
-hardware = detect_hardware()
-
-# 2. Configure target resolution (1080p or 4K)
 config = VisionScaleConfig()
-config.processing.target_resolution = ResolutionTarget.P1080
-config.processing.content_category = ContentCategory.AUTO  # Automatically detects anime vs live action
+config.processing.target_resolution = ResolutionTarget.P4K
+config.processing.content_category = ContentCategory.AUTO
 
-# 3. Create agent context
-context = AgentContext()
-context.set("video_input_path", "sample_input.mp4")
-
-# 4. Run Analyzer and Model Selector agents
-analyzer = VideoAnalyzerAgent(config)
-context = analyzer.run(context)
-
-selector = ModelSelectorAgent(config, hardware)
-context = selector.run(context)
-
-meta = context.get("video_metadata")
-target_w, target_h = context.get("target_dimensions")
-selected_models = context.get("selected_models")
-
-print(f"Source video: {meta.width}x{meta.height} @ {meta.fps} FPS")
-print(f"Target video: {target_w}x{target_h}")
-print(f"Selected AI model: {selected_models[0].name}")
-
-# 5. Define output path via Exporter Agent
-exporter = VideoExporterAgent(config, output_dir=platform.paths.output_dir)
-context = exporter.run(context)
-output_file = context.get("video_output_path")
-
-# 6. Stream frames through FFmpegWriter (preserves audio & original FPS)
-with FFmpegVideoWriter(
-    output_path=output_file,
-    width=target_w,
-    height=target_h,
-    fps=meta.fps,
-    source_audio_path="sample_input.mp4",
-) as writer:
-    for frame_idx, frame in FrameStream("sample_input.mp4"):
-        # Enhancement logic executes here per frame
-        # (e.g. enhanced_frame = upscaler.enhance_frame(frame))
-        writer.write_frame(frame)
-
-print(f"Export completed: {output_file}")
+output_path = enhance_video(
+    input_path="sample_input.mp4",
+    config=config,
+    progress_callback=lambda done, total: print(f"{done}/{total} frames"),
+)
+print(f"Enhanced video: {output_path}")
 ```
+
+Real-ESRGAN x4+ is used for live-action content and its x4+ Anime 6B variant for anime. Use a short clip first, enable Internet access to download weights, and select `ResolutionTarget.ORIGINAL` to retain the source dimensions.
 
 ---
 
